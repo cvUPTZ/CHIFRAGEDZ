@@ -14,6 +14,14 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
+const DEFAULT_GEMINI_MODEL = (process.env.GEMINI_MODEL || 'gemini-4-hydrogen').trim();
+const BQE_GEMINI_MODEL = (process.env.GEMINI_BQE_MODEL || DEFAULT_GEMINI_MODEL).trim();
+const PROFORMA_GEMINI_MODEL = (process.env.GEMINI_PROFORMA_MODEL || DEFAULT_GEMINI_MODEL).trim();
+
+function supportsThinkingLevel(modelName: string): boolean {
+  return /^gemini-(3|4)/i.test(modelName);
+}
+
 // Initialize Firebase Admin ONLY for verifyIdToken(token) — requires zero IAM permissions
 const adminApp = getApps().length
   ? getApp()
@@ -153,12 +161,14 @@ Exigences strictes :
 Ne devine JAMAIS de prix pour les articles Classe A.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+      model: BQE_GEMINI_MODEL,
       contents: {
         parts: [...fileParts, { text: promptText }],
       },
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
+        ...(supportsThinkingLevel(BQE_GEMINI_MODEL)
+          ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM } }
+          : {}),
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -253,7 +263,7 @@ app.post('/api/parse-proforma', proformaLimiter, async (req, res) => {
       .join('\n');
 
     const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+      model: PROFORMA_GEMINI_MODEL,
       contents: {
         parts: [
           {
@@ -272,7 +282,9 @@ Si un article n'apparaît pas sur la proforma, ne l'invente pas (mets 0).`,
         ],
       },
       config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        ...(supportsThinkingLevel(PROFORMA_GEMINI_MODEL)
+          ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+          : {}),
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,

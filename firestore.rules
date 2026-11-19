@@ -52,7 +52,7 @@ service cloud.firestore {
         && isValidId(data.uid)
         && data.uid == request.auth.uid
         && isValidString(data.displayName, 1, 120)
-        && isValidString(data.companyName, 1, 160)
+        && isValidString(data.companyName, 0, 160)
         && isValidWilayaCode(data.defaultWilayaCode)
         && data.preferredLang in ['fr', 'ar']
         && (!('rc' in data) || isValidString(data.rc, 0, 60))
@@ -125,7 +125,7 @@ service cloud.firestore {
           'tenderId', 'lotId', 'ownerId', 'articleNo', 'designation', 'rawDesignation',
           'unit', 'quantity', 'pageNumber', 'abcClass', 'trade', 'debourseSecDa',
           'confidenceRangePct', 'priceSource', 'selectedQuoteId', 'selectedSupplierName',
-          'brand', 'normalizedKey', 'createdAt', 'updatedAt'
+          'brand', 'normalizedKey', 'includeInRfq', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.tenderId)
         && data.tenderId == tenderId
@@ -147,6 +147,7 @@ service cloud.firestore {
         && (!('selectedSupplierName' in data) || data.selectedSupplierName == null || isValidString(data.selectedSupplierName, 0, 160))
         && (!('brand' in data) || data.brand == null || isValidString(data.brand, 0, 120))
         && isValidString(data.normalizedKey, 1, 200)
+        && (!('includeInRfq' in data) || data.includeInRfq is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -158,8 +159,8 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'tenderId', 'ownerId', 'lineItemId', 'type', 'severity', 'title',
-          'description', 'pageNumber', 'suggestedMultiplierPct', 'resolved',
-          'createdAt', 'updatedAt'
+          'description', 'pageNumber', 'suggestedMultiplierPct', 'suggestedUnit',
+          'clauseTag', 'resolved', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.tenderId)
         && data.tenderId == tenderId
@@ -172,6 +173,8 @@ service cloud.firestore {
         && isValidString(data.description, 1, 1000)
         && isValidNumberRange(data.pageNumber, 1, 2000)
         && (!('suggestedMultiplierPct' in data) || data.suggestedMultiplierPct == null || isValidNumberRange(data.suggestedMultiplierPct, 0, 100))
+        && (!('suggestedUnit' in data) || data.suggestedUnit == null || isValidString(data.suggestedUnit, 0, 24))
+        && (!('clauseTag' in data) || data.clauseTag == null || isValidString(data.clauseTag, 0, 120))
         && data.resolved is bool
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -385,7 +388,8 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly([
               'designation', 'unit', 'quantity', 'abcClass', 'trade',
               'debourseSecDa', 'confidenceRangePct', 'priceSource',
-              'selectedQuoteId', 'selectedSupplierName', 'brand', 'normalizedKey', 'updatedAt'
+              'selectedQuoteId', 'selectedSupplierName', 'brand', 'normalizedKey',
+              'includeInRfq', 'updatedAt'
             ])
           );
         allow delete: if isVerifiedUser() && isValidId(tenderId) && isValidId(itemId) && existing().ownerId == request.auth.uid && isTenderOpen();
@@ -469,8 +473,8 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          // Action: Close/reopen batch or update deadline
-          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'deadline', 'updatedAt'])
+          // Action: Close/reopen batch, refresh items, or update deadline
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'deadline', 'items', 'updatedAt'])
         );
       allow delete: if isVerifiedUser() && isValidId(shareToken) && existing().ownerId == request.auth.uid;
 

@@ -85,6 +85,7 @@
         "selectedSupplierName": { "type": "string", "maxLength": 160 },
         "brand": { "type": "string", "maxLength": 120 },
         "normalizedKey": { "type": "string", "maxLength": 200 },
+        "includeInRfq": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -104,6 +105,8 @@
         "description": { "type": "string", "maxLength": 1000 },
         "pageNumber": { "type": "number" },
         "suggestedMultiplierPct": { "type": "number" },
+        "suggestedUnit": { "type": "string", "maxLength": 24 },
+        "clauseTag": { "type": "string", "maxLength": 120 },
         "resolved": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }

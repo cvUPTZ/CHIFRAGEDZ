@@ -36,7 +36,7 @@ import {
 import { exportTenderToExcel } from '../utils/excelService';
 
 interface Props {
-  tender: TenderProject;
+  tender: TenderProject | null;
   privateBpu: PrivateBpuEntry[];
   companyLegal: CompanyLegalProfile;
   lang: AppLang;
@@ -83,21 +83,25 @@ export const Layer4BpuExport: React.FC<Props> = ({
     designation: '',
     unit: 'M2',
     brand: '',
-    wilayaCode: tender.wilayaCode,
+    wilayaCode: tender?.wilayaCode || '16',
     trade: 'Gros Œuvre & Revêtements' as TradeCategory,
     supplierName: '',
     debourseSecDa: '',
   });
 
-  const financials = useMemo(() => computeTenderFinancials(tender), [tender]);
+  const financials = useMemo(
+    () => (tender ? computeTenderFinancials(tender) : null),
+    [tender]
+  );
 
   const lotChartData = useMemo(() => {
+    if (!tender || !financials) return [];
     return tender.lots.map((lot) => ({
       name: lot.code,
       fullName: lot.name,
       montantHt: Math.round(financials.lotTotals[lot.id]?.totalHt || 0),
     }));
-  }, [tender.lots, financials.lotTotals]);
+  }, [tender, financials]);
 
   const filteredBpu = useMemo(() => {
     const q = searchBpu.trim().toLowerCase();
@@ -116,6 +120,7 @@ export const Layer4BpuExport: React.FC<Props> = ({
   );
 
   const handleExport = async () => {
+    if (!tender) return;
     setExporting(true);
     try {
       await exportTenderToExcel(tender, includeWords, companyLegal);
@@ -146,7 +151,7 @@ export const Layer4BpuExport: React.FC<Props> = ({
       designation: '',
       unit: 'M2',
       brand: '',
-      wilayaCode: tender.wilayaCode,
+      wilayaCode: tender?.wilayaCode || '16',
       trade: 'Gros Œuvre & Revêtements',
       supplierName: '',
       debourseSecDa: '',
@@ -154,10 +159,10 @@ export const Layer4BpuExport: React.FC<Props> = ({
     setShowAddForm(false);
   };
 
-  const totalHtNonZero = Math.max(1, financials.totalHt);
-  const pctA = Math.round((financials.classATotal / totalHtNonZero) * 100);
-  const pctB = Math.round((financials.classBTotal / totalHtNonZero) * 100);
-  const pctC = Math.max(0, 100 - pctA - pctB);
+  const totalHtNonZero = Math.max(1, financials?.totalHt || 0);
+  const pctA = Math.round(((financials?.classATotal || 0) / totalHtNonZero) * 100);
+  const pctB = Math.round(((financials?.classBTotal || 0) / totalHtNonZero) * 100);
+  const pctC = financials && financials.totalHt > 0 ? Math.max(0, 100 - pctA - pctB) : 0;
 
   return (
     <div className="space-y-6">
@@ -274,7 +279,8 @@ export const Layer4BpuExport: React.FC<Props> = ({
         )}
       </div>
 
-      {/* Top Grid: Submission Export & Financial Chart */}
+      {/* Top Grid: Submission Export & Financial Chart (shown when an active tender exists) */}
+      {tender && financials && (
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         {/* Export Control Panel */}
         <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg p-6 flex flex-col justify-between">
@@ -411,6 +417,7 @@ export const Layer4BpuExport: React.FC<Props> = ({
           </div>
         </div>
       </div>
+      )}
 
       {/* Private BPU Memory Database */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
@@ -436,13 +443,15 @@ export const Layer4BpuExport: React.FC<Props> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={onAutoFillFromPrivateBpu}
-              className="px-3 py-1.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap"
-            >
-              {t.autoFillPrivateBpu}
-            </button>
+            {tender && (
+              <button
+                type="button"
+                onClick={onAutoFillFromPrivateBpu}
+                className="px-3 py-1.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap"
+              >
+                {t.autoFillPrivateBpu}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setShowAddForm((v) => !v)}
@@ -563,7 +572,16 @@ export const Layer4BpuExport: React.FC<Props> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-xs">
-              {filteredBpu.map((entry) => {
+              {filteredBpu.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-10 px-4 text-center text-xs text-slate-500">
+                    {lang === 'ar'
+                      ? 'لا توجد أسعار محفوظة في قاعدة BPU الخاصة بك بعد. أضف سعراً يدوياً أو اعتمد عرض مورد لحفظه تلقائياً.'
+                      : 'Aucun prix enregistré dans votre base BPU Firestore. Ajoutez un prix de référence ci-dessus ou retenez un devis fournisseur.'}
+                  </td>
+                </tr>
+              ) : (
+                filteredBpu.map((entry) => {
                 const ageDays = getQuoteAgeDays(entry.quotedDate);
                 const isStale = ageDays > 60;
                 return (
@@ -605,7 +623,7 @@ export const Layer4BpuExport: React.FC<Props> = ({
                     </td>
                   </tr>
                 );
-              })}
+              }))}
             </tbody>
           </table>
         </div>

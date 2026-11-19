@@ -16,22 +16,24 @@ import {
   AnomalyFlag,
   AppLang,
   LineItem,
+  PrivateBpuEntry,
   TenderLot,
   TenderProject,
   TradeCategory,
 } from '../types/btp';
 import { UI_COPY } from '../data/i18n';
 import { importBqeFromExcel } from '../utils/excelService';
-import { lookupReferenceBpu } from '../data/algeriaReference';
 import {
   classifyAbcRisk,
   classifyTrade,
+  matchPrivateBpu,
   normalizeItemKey,
   runDeterministicAudit,
 } from '../utils/pricingEngine';
 
 interface Props {
   tender: TenderProject;
+  privateBpu: PrivateBpuEntry[];
   lang: AppLang;
   isLocked?: boolean;
   getAuthToken: () => Promise<string | null>;
@@ -42,8 +44,7 @@ interface Props {
     lots: TenderLot[];
     lineItems: LineItem[];
     anomalies: AnomalyFlag[];
-  }) => void;
-  onLoadSample: () => void;
+  }) => Promise<void> | void;
   onResolveAnomaly: (anomalyId: string) => void;
   onFixItemUnit: (lineItemId: string, newUnit: string, anomalyId: string) => void;
   onFixItemQuantity: (lineItemId: string, newQty: number, anomalyId: string) => void;
@@ -74,11 +75,11 @@ function fileToBase64(file: File): Promise<string> {
 
 export const Layer1IngestionAudit: React.FC<Props> = ({
   tender,
+  privateBpu,
   lang,
   isLocked = false,
   getAuthToken,
   onReplaceExtractedData,
-  onLoadSample,
   onResolveAnomaly,
   onFixItemUnit,
   onFixItemQuantity,
@@ -130,9 +131,10 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
         const result = await importBqeFromExcel(
           excelFile.file,
           tender.id,
-          tender.wilayaCode
+          tender.wilayaCode,
+          privateBpu
         );
-        onReplaceExtractedData({
+        await onReplaceExtractedData({
           lots: result.lots,
           lineItems: result.lineItems,
           anomalies: result.anomalies,
@@ -247,32 +249,55 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
 
             (rawLot.items || []).forEach((it) => {
               const unit = (it.unit || 'U').toUpperCase();
-              const trade = (it.trade as TradeCategory) || classifyTrade(it.designation, lotObj!.name);
-              const refMatch = lookupReferenceBpu(it.designation, unit, tender.wilayaCode);
-              const abcClass =
-                it.abcClass === 'A' || it.abcClass === 'B' || it.abcClass === 'C'
-                  ? it.abcClass
-                  : classifyAbcRisk(it.designation, Number(it.quantity) || 0, refMatch?.debourseSecDa ?? 0);
-
-              const isClassA = abcClass === 'A';
-              lineItems.push({
+              const cleanDesig = it.designation || it.rawDesignation;
+              const trade = (it.trade as TradeCategory) || classifyTrade(cleanDesig, lotObj!.name);
+              const normalizedKey = normalizeItemKey(cleanDesig, unit);
+              const provisional: LineItem = {
                 id: `li_ai_${itemCounter++}`,
                 tenderId: tender.id,
                 lotId: lotObj!.id,
                 articleNo: it.articleNo || `${lIdx + 1}.${itemCounter}`,
-                designation: it.designation || it.rawDesignation,
-                rawDesignation: it.rawDesignation || it.designation,
+                designation: cleanDesig,
+                rawDesignation: it.rawDesignation || cleanDesig,
                 unit,
                 quantity: Number(it.quantity) || 0,
                 pageNumber: Number(it.pageNumber) || c * CHUNK_SIZE + 1,
-                abcClass,
+                abcClass: 'B',
                 trade,
-                debourseSecDa: isClassA ? 0 : refMatch?.debourseSecDa ?? (abcClass === 'C' ? 1200 : 2400),
-                confidenceRangePct: isClassA ? 0 : refMatch?.confidenceRangePct ?? 14,
-                priceSource: isClassA ? 'proforma_required' : 'indicative_bpu',
-                normalizedKey: normalizeItemKey(it.designation || it.rawDesignation, unit),
-                includeInRfq: isClassA,
-              });
+                debourseSecDa: 0,
+                confidenceRangePct: 0,
+                priceSource: 'indicative_bpu',
+                normalizedKey,
+                includeInRfq: false,
+              };
+
+              const dbMatch = matchPrivateBpu(provisional, privateBpu, tender.wilayaCode);
+              const abcClass =
+                it.abcClass === 'A' || it.abcClass === 'B' || it.abcClass === 'C'
+                  ? it.abcClass
+                  : classifyAbcRisk(cleanDesig, provisional.quantity, dbMatch?.debourseSecDa ?? 0);
+
+              const isClassA = abcClass === 'A';
+              provisional.abcClass = abcClass;
+              provisional.includeInRfq = isClassA;
+
+              if (isClassA) {
+                provisional.debourseSecDa = 0;
+                provisional.priceSource = 'proforma_required';
+                provisional.confidenceRangePct = 0;
+              } else if (dbMatch) {
+                provisional.debourseSecDa = dbMatch.debourseSecDa;
+                provisional.priceSource = 'private_bpu';
+                provisional.selectedSupplierName = `${dbMatch.supplierName} (BPU Privé)`;
+                provisional.brand = dbMatch.brand;
+                provisional.confidenceRangePct = 5;
+              } else {
+                provisional.debourseSecDa = 0;
+                provisional.priceSource = 'indicative_bpu';
+                provisional.confidenceRangePct = 0;
+              }
+
+              lineItems.push(provisional);
             });
           }
         );
@@ -325,7 +350,7 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
         if (!exists) mergedAnomalies.push(df);
       }
 
-      onReplaceExtractedData({
+      await onReplaceExtractedData({
         title: detectedTitle || tender.title,
         reference: detectedRef || tender.reference,
         clientName: detectedClient || tender.clientName,
@@ -363,18 +388,9 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         <div className="lg:col-span-7 bg-white border border-slate-200 rounded-lg p-6 flex flex-col justify-between">
           <div>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900">{t.uploadTitle}</h2>
-                <p className="mt-1 text-sm text-slate-600 leading-relaxed">{t.uploadSubtitle}</p>
-              </div>
-              <button
-                type="button"
-                onClick={onLoadSample}
-                className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
-              >
-                {t.loadSample}
-              </button>
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">{t.uploadTitle}</h2>
+              <p className="mt-1 text-sm text-slate-600 leading-relaxed">{t.uploadSubtitle}</p>
             </div>
 
             <div
@@ -481,6 +497,11 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
             </button>
           </div>
 
+          {chunkProgress && (
+            <div className="mt-3 p-3 rounded-md bg-slate-50 border border-slate-200 text-xs text-slate-700">
+              {chunkProgress}
+            </div>
+          )}
           {extractError && (
             <div className="mt-3 p-3 rounded-md bg-red-50 border border-red-200 text-xs text-red-800">
               {extractError}
@@ -724,7 +745,7 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
                           <input
                             type="number"
                             min={1}
-                            placeholder="Qté (ex. 420)"
+                            placeholder="Quantité"
                             value={qtyDrafts[anom.id] ?? ''}
                             onChange={(e) =>
                               setQtyDrafts((prev) => ({ ...prev, [anom.id]: e.target.value }))
@@ -733,11 +754,12 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
                           />
                           <button
                             type="button"
+                            disabled={!qtyDrafts[anom.id] || Number(qtyDrafts[anom.id]) <= 0}
                             onClick={() => {
-                              const parsed = Number(qtyDrafts[anom.id] || 420);
+                              const parsed = Number(qtyDrafts[anom.id]);
                               if (parsed > 0) onFixItemQuantity(linkedItem.id, parsed, anom.id);
                             }}
-                            className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-md transition-colors whitespace-nowrap"
+                            className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-md transition-colors whitespace-nowrap"
                           >
                             {lang === 'ar' ? 'تثبيت الكمية' : 'Valider Qté'}
                           </button>

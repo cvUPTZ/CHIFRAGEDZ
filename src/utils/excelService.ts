@@ -1,24 +1,26 @@
 import ExcelJS from 'exceljs';
-import { CompanyLegalProfile, LineItem, TenderLot, TenderProject } from '../types/btp';
+import { CompanyLegalProfile, LineItem, PrivateBpuEntry, TenderLot, TenderProject } from '../types/btp';
 import {
   BTP_TYPO_DICTIONARY,
   classifyAbcRisk,
   classifyTrade,
   computeUnitPriceHT,
   getEffectiveCoefficients,
+  matchPrivateBpu,
   montantEnLettresDZD,
   normalizeItemKey,
   runDeterministicAudit,
 } from './pricingEngine';
-import { lookupReferenceBpu } from '../data/algeriaReference';
 
 /**
  * Import messy .xlsx BQE file into structured Lots + LineItems + Audit Anomalies
+ * Uses the contractor's live Firestore privateBpu database for price matching (zero hardcoded values).
  */
 export async function importBqeFromExcel(
   file: File,
   tenderId: string,
-  wilayaCode: string
+  wilayaCode: string,
+  privateBpu: PrivateBpuEntry[] = []
 ): Promise<{ lots: TenderLot[]; lineItems: LineItem[]; anomalies: ReturnType<typeof runDeterministicAudit> }> {
   const arrayBuffer = await file.arrayBuffer();
   const workbook = new ExcelJS.Workbook();
@@ -100,13 +102,8 @@ export async function importBqeFromExcel(
     }
 
     const trade = classifyTrade(cleanedDesignation, currentLot!.name);
-    const refMatch = lookupReferenceBpu(cleanedDesignation, unit, wilayaCode);
-    const abcClass = classifyAbcRisk(cleanedDesignation, quantity, refMatch?.debourseSecDa ?? 0);
-
-    const debourseSecDa = abcClass === 'A' ? 0 : refMatch?.debourseSecDa ?? (abcClass === 'C' ? 1200 : 2500);
-    const priceSource = abcClass === 'A' ? 'proforma_required' : 'indicative_bpu';
-
-    lineItems.push({
+    const normalizedKey = normalizeItemKey(cleanedDesignation, unit);
+    const provisionalItem: LineItem = {
       id: `li_xlsx_${itemIdx++}`,
       tenderId,
       lotId: currentLot!.id,
@@ -116,14 +113,39 @@ export async function importBqeFromExcel(
       unit,
       quantity,
       pageNumber: Math.max(1, Math.ceil(rowNumber / 35)),
-      abcClass,
+      abcClass: 'B',
       trade,
-      debourseSecDa,
-      confidenceRangePct: abcClass === 'A' ? 0 : refMatch?.confidenceRangePct ?? 15,
-      priceSource,
-      normalizedKey: normalizeItemKey(cleanedDesignation, unit),
-      includeInRfq: abcClass === 'A',
-    });
+      debourseSecDa: 0,
+      confidenceRangePct: 0,
+      priceSource: 'indicative_bpu',
+      normalizedKey,
+      includeInRfq: false,
+    };
+
+    const dbMatch = matchPrivateBpu(provisionalItem, privateBpu, wilayaCode);
+    const abcClass = classifyAbcRisk(cleanedDesignation, quantity, dbMatch?.debourseSecDa ?? 0);
+    const isClassA = abcClass === 'A';
+
+    provisionalItem.abcClass = abcClass;
+    provisionalItem.includeInRfq = isClassA;
+
+    if (isClassA) {
+      provisionalItem.debourseSecDa = 0;
+      provisionalItem.priceSource = 'proforma_required';
+      provisionalItem.confidenceRangePct = 0;
+    } else if (dbMatch) {
+      provisionalItem.debourseSecDa = dbMatch.debourseSecDa;
+      provisionalItem.priceSource = 'private_bpu';
+      provisionalItem.selectedSupplierName = `${dbMatch.supplierName} (BPU Privé)`;
+      provisionalItem.brand = dbMatch.brand;
+      provisionalItem.confidenceRangePct = 5;
+    } else {
+      provisionalItem.debourseSecDa = 0;
+      provisionalItem.priceSource = 'indicative_bpu';
+      provisionalItem.confidenceRangePct = 0;
+    }
+
+    lineItems.push(provisionalItem);
   });
 
   if (lineItems.length === 0) {

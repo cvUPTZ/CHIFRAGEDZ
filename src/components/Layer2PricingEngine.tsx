@@ -30,6 +30,7 @@ interface Props {
   onUpdateGlobalCoeff: (patch: Partial<Pick<TenderProject, 'wilayaCode' | 'wilayaName' | 'globalTransportPct' | 'globalOccupiedSitePct' | 'globalOverheadPct' | 'globalMarginPct' | 'tvaRate'>>) => void;
   onUpdateLotOverride: (lotId: string, patch: Partial<Pick<TenderLot, 'overrideTransportPct' | 'overrideOccupiedSitePct' | 'overrideOverheadPct' | 'overrideMarginPct'>>) => void;
   onUpdateLineItem: (itemId: string, patch: Partial<LineItem>) => void;
+  onSaveItemToBpu?: (item: LineItem) => void;
   onAutoFillFromPrivateBpu: () => number;
   onRouteToRfq: () => void;
 }
@@ -40,6 +41,7 @@ export const Layer2PricingEngine: React.FC<Props> = ({
   onUpdateGlobalCoeff,
   onUpdateLotOverride,
   onUpdateLineItem,
+  onSaveItemToBpu,
   onAutoFillFromPrivateBpu,
   onRouteToRfq,
 }) => {
@@ -287,6 +289,20 @@ export const Layer2PricingEngine: React.FC<Props> = ({
 
       {/* BQE Table Grouped by Lot */}
       <div className="space-y-5">
+        {tender.lineItems.length === 0 && (
+          <div className="bg-white border border-slate-200 rounded-lg p-10 text-center">
+            <p className="text-sm font-medium text-slate-800">
+              {lang === 'ar'
+                ? 'لا توجد بنود مستخرجة في هذه الصفقة بعد.'
+                : 'Aucun article BQE dans cet appel d’offres.'}
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              {lang === 'ar'
+                ? 'انتقل إلى مرحلة الإدخال والتدقيق لرفع ملف PDF/CamScanner أو Excel (.xlsx).'
+                : 'Rendez-vous dans « Ingestion & Audit » pour importer vos scans CamScanner (PDF/images) ou votre fichier Excel (.xlsx).'}
+            </p>
+          </div>
+        )}
         {filteredItemsByLot.map(({ lot, items }) => {
           if (items.length === 0) return null;
           const eff = getEffectiveCoefficients(tender, lot);
@@ -616,9 +632,33 @@ export const Layer2PricingEngine: React.FC<Props> = ({
                             ) : item.priceSource === 'proforma_required' ? (
                               <div className="text-[11px] font-semibold text-red-700">{t.srcProformaReq}</div>
                             ) : item.priceSource === 'manual_override' ? (
-                              <div className="text-[11px] font-medium text-slate-700">{t.srcManual}</div>
+                              <div className="space-y-1">
+                                <div className="text-[11px] font-medium text-slate-700">{t.srcManual}</div>
+                                {onSaveItemToBpu && item.debourseSecDa > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onSaveItemToBpu(item)}
+                                    className="text-[10px] font-medium text-blue-700 hover:underline"
+                                  >
+                                    + Sauvegarder dans BPU
+                                  </button>
+                                )}
+                              </div>
                             ) : (
-                              <div className="text-[11px] font-medium text-amber-700">{t.srcIndicative}</div>
+                              <div className="space-y-1">
+                                <div className="text-[11px] font-medium text-amber-700">
+                                  {item.debourseSecDa > 0 ? t.srcIndicative : 'À chiffrer'}
+                                </div>
+                                {onSaveItemToBpu && item.debourseSecDa > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onSaveItemToBpu(item)}
+                                    className="text-[10px] font-medium text-blue-700 hover:underline"
+                                  >
+                                    + Sauvegarder dans BPU
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </td>
                         </tr>
