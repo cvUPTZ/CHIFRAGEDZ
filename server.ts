@@ -1,15 +1,76 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getApp, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
+
+// Initialize Firebase Admin ONLY for verifyIdToken(token) — requires zero IAM permissions
+const adminApp = getApps().length
+  ? getApp()
+  : initializeApp({ projectId: firebaseConfig.projectId });
+const adminAuth = getAuth(adminApp);
+
+interface AuthenticatedRequest extends Request {
+  verifiedUid?: string;
+}
+
+/**
+ * In-memory sliding-window rate limiter per IP or verified Firebase UID
+ */
+function createRateLimiter(opts: { windowMs: number; maxAuth: number; maxAnon: number }) {
+  const buckets = new Map<string, number[]>();
+
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    const key = req.verifiedUid ? `uid:${req.verifiedUid}` : `ip:${req.ip || 'unknown'}`;
+    const limit = req.verifiedUid ? opts.maxAuth : opts.maxAnon;
+
+    const history = (buckets.get(key) || []).filter((ts) => now - ts < opts.windowMs);
+    if (history.length >= limit) {
+      return res.status(429).json({
+        error: req.verifiedUid
+          ? 'Quota horaire d’extractions atteint. Réessayez dans quelques minutes.'
+          : 'Limite de démonstration atteinte. Connectez-vous avec Google pour augmenter votre quota.',
+      });
+    }
+
+    history.push(now);
+    buckets.set(key, history);
+    next();
+  };
+}
+
+/**
+ * Verify Firebase ID token when Authorization header is provided (rejects forged tokens with 401)
+ */
+async function verifyFirebaseAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return next();
+  }
+  if (!authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'En-tête Authorization invalide.' });
+  }
+  const token = authHeader.slice('Bearer '.length).trim();
+  try {
+    const decoded = await adminAuth.verifyIdToken(token);
+    req.verifiedUid = decoded.uid;
+    return next();
+  } catch (err) {
+    console.error('Firebase token verification failed:', err);
+    return res.status(401).json({ error: 'Session expirée ou jeton Firebase invalide. Veuillez vous reconnecter.' });
+  }
+}
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -29,24 +90,36 @@ function getGeminiClient(): GoogleGenAI {
 const app = express();
 app.use(express.json({ limit: '35mb' }));
 
+const extractLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, maxAuth: 60, maxAnon: 12 });
+const proformaLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, maxAuth: 60, maxAnon: 20 });
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'chiffragedz-api' });
 });
 
 /**
  * Layer 1: Server-side Gemini Vision BQE Extraction & Anomaly Auditor
- * Accepts multi-page CamScanner PDFs/images (normal or reverse order)
+ * Supports chunked multi-page CamScanner PDFs/images with pageOffset tracking
  */
-app.post('/api/extract-bqe', async (req, res) => {
+app.post('/api/extract-bqe', verifyFirebaseAuth, extractLimiter, async (req: AuthenticatedRequest, res) => {
   try {
-    const { files, reverseOrder = false, wilayaName = 'Alger' } = req.body as {
+    const {
+      files,
+      reverseOrder = false,
+      wilayaName = 'Alger',
+      pageOffset = 0,
+    } = req.body as {
       files?: Array<{ name: string; mimeType: string; base64: string }>;
       reverseOrder?: boolean;
       wilayaName?: string;
+      pageOffset?: number;
     };
 
     if (!Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ error: 'Aucun fichier PDF ou image fourni pour extraction.' });
+    }
+    if (files.length > 8) {
+      return res.status(400).json({ error: 'Maximum 8 pages par lot d’extraction. Utilisez le découpage par lots.' });
     }
 
     const orderedFiles = reverseOrder ? [...files].reverse() : files;
@@ -59,11 +132,12 @@ app.post('/api/extract-bqe', async (req, res) => {
       },
     }));
 
+    const startPage = Math.max(1, Number(pageOffset) + 1);
     const promptText = `Tu es un métreur-vérificateur expert en marchés publics BTP en Algérie (Cahier des Charges / BQE).
-Analyse les pages scannées ci-jointes (${orderedFiles.length} document(s), ordre ${reverseOrder ? 'inversé corrigé' : 'normal'}, Wilaya cible: ${wilayaName}).
+Analyse les pages scannées ci-jointes (${orderedFiles.length} document(s), à partir de la page ${startPage}, ordre ${reverseOrder ? 'inversé corrigé' : 'normal'}, Wilaya cible: ${wilayaName}).
 
 Exigences strictes :
-1. Extrais la structure hiérarchique complète : Lots -> Articles (articleNo, rawDesignation conservée mot pour mot en français officiel, designation normalisée si faute OCR typique algérienne comme Flein-koot->Flinkote, Alucobande->Alucobond, Kut bak->Cut-back, SCHNEDIR->Schneider Electric, unit, quantity, pageNumber).
+1. Extrais la structure hiérarchique complète : Lots -> Articles (articleNo, rawDesignation conservée mot pour mot en français officiel, designation normalisée si faute OCR typique algérienne comme Flein-koot->Flinkote, Alucobande->Alucobond, Kut bak->Cut-back, SCHNEDIR->Schneider Electric, unit, quantity, pageNumber commençant à ${startPage}).
 2. Classifie chaque article en ABC (80/20) :
    - 'A' : équipements importés coûteux et gros ouvrages critiques (groupe électrogène, transformateur, TGBT, chaudière, onduleur UPS, climatiseurs/VRF, alucobond, enrobé, centrale incendie).
    - 'B' : matériaux standards (carrelage, peinture, câbles, tubes PVC/PPR, SBS, TVO, PEHD).
@@ -156,9 +230,9 @@ Ne devine JAMAIS de prix pour les articles Classe A.`;
 });
 
 /**
- * Layer 3: Supplier Proforma Photo OCR Parser (used inside no-login Micro-RFQ portal)
+ * Layer 3: Supplier Proforma Photo OCR Parser (rate-limited for no-login Micro-RFQ portal)
  */
-app.post('/api/parse-proforma', async (req, res) => {
+app.post('/api/parse-proforma', proformaLimiter, async (req, res) => {
   try {
     const { imageBase64, mimeType = 'image/jpeg', rfqItems = [] } = req.body as {
       imageBase64?: string;
@@ -168,6 +242,9 @@ app.post('/api/parse-proforma', async (req, res) => {
 
     if (!imageBase64) {
       return res.status(400).json({ error: 'Aucune photo de facture proforma fournie.' });
+    }
+    if (rfqItems.length > 30) {
+      return res.status(400).json({ error: 'Trop d’articles dans la demande Micro-RFQ (max 30).' });
     }
 
     const ai = getGeminiClient();

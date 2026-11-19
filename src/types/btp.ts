@@ -145,6 +145,16 @@ export interface PrivateBpuEntry {
   quotedDate: string;
 }
 
+export interface CompanyLegalProfile {
+  companyName: string;
+  rc: string;
+  nif: string;
+  nis: string;
+  ai: string;
+  rib: string;
+  qualification: string;
+}
+
 export interface TenderProject {
   id: string;
   title: string;

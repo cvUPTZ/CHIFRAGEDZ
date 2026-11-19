@@ -45,13 +45,22 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'displayName', 'companyName', 'defaultWilayaCode', 'preferredLang', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'displayName', 'companyName', 'defaultWilayaCode', 'preferredLang', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'companyName', 'defaultWilayaCode', 'preferredLang',
+          'rc', 'nif', 'nis', 'ai', 'rib', 'qualification', 'createdAt', 'updatedAt'
+        ])
         && isValidId(data.uid)
         && data.uid == request.auth.uid
         && isValidString(data.displayName, 1, 120)
         && isValidString(data.companyName, 1, 160)
         && isValidWilayaCode(data.defaultWilayaCode)
         && data.preferredLang in ['fr', 'ar']
+        && (!('rc' in data) || isValidString(data.rc, 0, 60))
+        && (!('nif' in data) || isValidString(data.nif, 0, 40))
+        && (!('nis' in data) || isValidString(data.nis, 0, 40))
+        && (!('ai' in data) || isValidString(data.ai, 0, 40))
+        && (!('rib' in data) || isValidString(data.rib, 0, 60))
+        && (!('qualification' in data) || isValidString(data.qualification, 0, 120))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -267,7 +276,10 @@ service cloud.firestore {
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'companyName', 'defaultWilayaCode', 'preferredLang', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'companyName', 'defaultWilayaCode', 'preferredLang',
+          'rc', 'nif', 'nis', 'ai', 'rib', 'qualification', 'updatedAt'
+        ]);
       allow delete: if false;
     }
 

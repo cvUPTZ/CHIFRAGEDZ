@@ -6,12 +6,14 @@ import {
   User,
 } from 'firebase/auth';
 import {
+  Briefcase,
   Cloud,
   Code2,
   Database,
   Download,
   FileSearch,
   Globe,
+  Lock,
   LogIn,
   LogOut,
   MessageSquare,
@@ -19,6 +21,7 @@ import {
 } from 'lucide-react';
 import {
   AppLang,
+  CompanyLegalProfile,
   LineItem,
   PrivateBpuEntry,
   RfqBatch,
@@ -28,6 +31,7 @@ import {
   TradeCategory,
 } from './types/btp';
 import {
+  ALGERIA_WILAYAS,
   createSampleAlgerianTender,
   STARTER_PRIVATE_BPU,
 } from './data/algeriaReference';
@@ -41,15 +45,20 @@ import {
 import { exportTenderToExcel } from './utils/excelService';
 import { auth, googleProvider, testFirestoreConnection } from './lib/firebase';
 import {
+  deletePrivateBpuEntryFromFirestore,
+  deleteTenderFromFirestore,
   fetchPublicRfqBatch,
-  fetchQuotesForOwnerBatch,
+  loadAllTendersFromFirestore,
   loadPrivateBpuFromFirestore,
+  loadUserLegalProfile,
   publishRfqBatchToFirestore,
   savePrivateBpuEntryToFirestore,
   saveTenderToFirestore,
   submitPublicSupplierQuote,
+  subscribeToBatchQuotes,
   syncUserProfile,
 } from './services/firestoreSync';
+import { TenderPortfolioView } from './components/TenderPortfolioView';
 import { Layer1IngestionAudit } from './components/Layer1IngestionAudit';
 import { Layer2PricingEngine } from './components/Layer2PricingEngine';
 import { Layer3MicroRfqHub } from './components/Layer3MicroRfqHub';
@@ -58,19 +67,33 @@ import { SupplierMicroRfqPortal } from './components/SupplierMicroRfqPortal';
 import { ArchitectureSpecsView } from './components/ArchitectureSpecsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
-type ActiveTab = 'ingestion' | 'pricing' | 'rfq' | 'bpu' | 'specs';
+type ActiveTab = 'portfolio' | 'ingestion' | 'pricing' | 'rfq' | 'bpu' | 'specs';
 
-const STORAGE_TENDER_KEY = 'chiffragedz_tender_v1';
+const STORAGE_TENDERS_KEY = 'chiffragedz_tenders_v2';
 const STORAGE_BPU_KEY = 'chiffragedz_bpu_v1';
+const STORAGE_LEGAL_KEY = 'chiffragedz_legal_v1';
 
-function loadInitialTender(): TenderProject {
+const DEFAULT_LEGAL: CompanyLegalProfile = {
+  companyName: 'EURL Soummam BTP & Travaux Publics',
+  rc: '06/00-0148290B21',
+  nif: '002106014829054',
+  nis: '002106099124501',
+  ai: '06014482190',
+  rib: '002 00045 0452200148 92',
+  qualification: 'Catégorie V — Bâtiment & VRD',
+};
+
+function loadInitialTenders(): TenderProject[] {
   try {
-    const raw = localStorage.getItem(STORAGE_TENDER_KEY);
-    if (raw) return JSON.parse(raw);
+    const raw = localStorage.getItem(STORAGE_TENDERS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
   } catch {
-    // fallback to sample
+    // fallback
   }
-  return createSampleAlgerianTender();
+  return [createSampleAlgerianTender()];
 }
 
 function loadInitialBpu(): PrivateBpuEntry[] {
@@ -78,16 +101,28 @@ function loadInitialBpu(): PrivateBpuEntry[] {
     const raw = localStorage.getItem(STORAGE_BPU_KEY);
     if (raw) return JSON.parse(raw);
   } catch {
-    // fallback to starter
+    // fallback
   }
   return STARTER_PRIVATE_BPU;
+}
+
+function loadInitialLegal(): CompanyLegalProfile {
+  try {
+    const raw = localStorage.getItem(STORAGE_LEGAL_KEY);
+    if (raw) return { ...DEFAULT_LEGAL, ...JSON.parse(raw) };
+  } catch {
+    // fallback
+  }
+  return DEFAULT_LEGAL;
 }
 
 function ChiffrageApp() {
   const [lang, setLang] = useState<AppLang>('fr');
   const [activeTab, setActiveTab] = useState<ActiveTab>('ingestion');
-  const [tender, setTender] = useState<TenderProject>(loadInitialTender);
+  const [tenders, setTenders] = useState<TenderProject[]>(loadInitialTenders);
+  const [activeTenderId, setActiveTenderId] = useState<string>(() => loadInitialTenders()[0].id);
   const [privateBpu, setPrivateBpu] = useState<PrivateBpuEntry[]>(loadInitialBpu);
+  const [companyLegal, setCompanyLegal] = useState<CompanyLegalProfile>(loadInitialLegal);
   const [user, setUser] = useState<User | null>(null);
   const [syncingCloud, setSyncingCloud] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
@@ -102,6 +137,19 @@ function ChiffrageApp() {
   const [standaloneLoading, setStandaloneLoading] = useState(Boolean(standaloneToken));
 
   const t = UI_COPY[lang];
+
+  const tender = useMemo(
+    () => tenders.find((x) => x.id === activeTenderId) || tenders[0],
+    [tenders, activeTenderId]
+  );
+
+  const isLocked = tender.status === 'submitted';
+
+  const updateActiveTender = (updater: (prev: TenderProject) => TenderProject) => {
+    setTenders((prevList) =>
+      prevList.map((item) => (item.id === tender.id ? updater(item) : item))
+    );
+  };
 
   // Test Firestore connection once on boot
   useEffect(() => {
@@ -125,7 +173,8 @@ function ChiffrageApp() {
         // Fallback to local batch if previewing unsynced demo token
       }
       if (active) {
-        const localMatch = tender.rfqBatches.find((b) => b.shareToken === standaloneToken) || null;
+        const allLocalBatches = tenders.flatMap((x) => x.rfqBatches);
+        const localMatch = allLocalBatches.find((b) => b.shareToken === standaloneToken) || null;
         setStandaloneBatch(localMatch);
         setStandaloneLoading(false);
       }
@@ -133,34 +182,33 @@ function ChiffrageApp() {
     return () => {
       active = false;
     };
-  }, [standaloneToken, tender.rfqBatches]);
+  }, [standaloneToken, tenders]);
 
-  // Listen to Firebase Google Auth
+  // Listen to Firebase Google Auth & Hydrate Multi-Tender Cloud Portfolio
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       if (u && u.emailVerified) {
         try {
           await syncUserProfile(u.uid, u.displayName || 'Entrepreneur BTP', lang);
-          const remoteBpu = await loadPrivateBpuFromFirestore(u.uid);
+          const [remoteLegal, remoteBpu, remoteTenders] = await Promise.all([
+            loadUserLegalProfile(u.uid),
+            loadPrivateBpuFromFirestore(u.uid),
+            loadAllTendersFromFirestore(u.uid),
+          ]);
+          if (remoteLegal && remoteLegal.companyName) {
+            setCompanyLegal((prev) => ({ ...prev, ...remoteLegal }));
+          }
           if (remoteBpu.length > 0) {
             setPrivateBpu(remoteBpu);
           }
-          // Fetch any live supplier quotes submitted on published batches
-          const updatedBatches = await Promise.all(
-            tender.rfqBatches.map(async (b) => {
-              try {
-                const liveQuotes = await fetchQuotesForOwnerBatch(u.uid, b.shareToken);
-                if (liveQuotes.length === 0) return b;
-                const existingIds = new Set(b.quotes.map((q) => q.id));
-                const merged = [...b.quotes, ...liveQuotes.filter((lq) => !existingIds.has(lq.id))];
-                return { ...b, quotes: merged };
-              } catch {
-                return b;
-              }
-            })
-          );
-          setTender((prev) => ({ ...prev, rfqBatches: updatedBatches }));
+          if (remoteTenders.length > 0) {
+            setTenders((localList) => {
+              const remoteIds = new Set(remoteTenders.map((rt) => rt.id));
+              const localOnly = localList.filter((lt) => !remoteIds.has(lt.id));
+              return [...remoteTenders, ...localOnly];
+            });
+          }
         } catch {
           // Non-blocking sync warning
         }
@@ -170,14 +218,43 @@ function ChiffrageApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Real-time Firestore onSnapshot listeners for incoming supplier quotes on active tender batches
+  const activeShareTokensKey = tender.rfqBatches.map((b) => b.shareToken).join(',');
+  useEffect(() => {
+    if (!user || !user.emailVerified || tender.rfqBatches.length === 0) return;
+    const unsubscribers = tender.rfqBatches.map((batch) =>
+      subscribeToBatchQuotes(user.uid, batch.shareToken, (liveQuotes) => {
+        if (liveQuotes.length === 0) return;
+        setTenders((prevList) =>
+          prevList.map((proj) => {
+            if (proj.id !== tender.id) return proj;
+            return {
+              ...proj,
+              rfqBatches: proj.rfqBatches.map((b) => {
+                if (b.shareToken !== batch.shareToken) return b;
+                const liveIds = new Set(liveQuotes.map((q) => q.id));
+                const localSeedQuotes = b.quotes.filter((q) => !liveIds.has(q.id));
+                return { ...b, quotes: [...localSeedQuotes, ...liveQuotes] };
+              }),
+            };
+          })
+        );
+      })
+    );
+    return () => {
+      unsubscribers.forEach((unsub) => unsub());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, tender.id, activeShareTokensKey]);
+
   // Persist locally
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_TENDER_KEY, JSON.stringify(tender));
+      localStorage.setItem(STORAGE_TENDERS_KEY, JSON.stringify(tenders));
     } catch {
       // ignore storage quota
     }
-  }, [tender]);
+  }, [tenders]);
 
   useEffect(() => {
     try {
@@ -187,13 +264,29 @@ function ChiffrageApp() {
     }
   }, [privateBpu]);
 
-  // Update HTML dir & lang attributes cleanly
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_LEGAL_KEY, JSON.stringify(companyLegal));
+    } catch {
+      // ignore storage quota
+    }
+  }, [companyLegal]);
+
   useEffect(() => {
     document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
     document.documentElement.lang = lang;
   }, [lang]);
 
   const financials = useMemo(() => computeTenderFinancials(tender), [tender]);
+
+  const getAuthToken = async (): Promise<string | null> => {
+    if (!auth.currentUser) return null;
+    try {
+      return await auth.currentUser.getIdToken();
+    } catch {
+      return null;
+    }
+  };
 
   const handleGoogleAuth = async () => {
     try {
@@ -212,6 +305,7 @@ function ChiffrageApp() {
     setSyncingCloud(true);
     setSyncNotice(null);
     try {
+      await syncUserProfile(user.uid, user.displayName || 'Entrepreneur BTP', lang, companyLegal);
       await saveTenderToFirestore(user.uid, tender);
       for (const batch of tender.rfqBatches) {
         await publishRfqBatchToFirestore(user.uid, batch);
@@ -219,12 +313,88 @@ function ChiffrageApp() {
       for (const entry of privateBpu) {
         await savePrivateBpuEntryToFirestore(user.uid, entry);
       }
-      setSyncNotice(lang === 'ar' ? 'تمت المزامنة بنجاح مع السحابة.' : 'Offre, RFQ et BPU Privé synchronisés.');
+      setSyncNotice(lang === 'ar' ? 'تمت المزامنة بنجاح مع السحابة.' : 'Offre, RFQ, Profil Légal et BPU synchronisés.');
       setTimeout(() => setSyncNotice(null), 3500);
     } catch (err) {
       setSyncNotice(err instanceof Error ? err.message : 'Erreur de synchronisation.');
     } finally {
       setSyncingCloud(false);
+    }
+  };
+
+  // --- Portfolio Handlers ---
+  const handleCreateTender = (payload: {
+    title: string;
+    reference: string;
+    clientName: string;
+    wilayaCode: string;
+  }) => {
+    const w = ALGERIA_WILAYAS.find((x) => x.code === payload.wilayaCode);
+    const id = `ao_${payload.wilayaCode}_${Date.now()}`;
+    const next: TenderProject = {
+      id,
+      title: payload.title,
+      reference: payload.reference,
+      clientName: payload.clientName,
+      wilayaCode: payload.wilayaCode,
+      wilayaName: w?.nameFr || 'Alger',
+      status: 'draft',
+      globalTransportPct: w?.defaultTransportPct ?? 3,
+      globalOccupiedSitePct: 0,
+      globalOverheadPct: 12,
+      globalMarginPct: 15,
+      tvaRate: 19,
+      lots: [],
+      lineItems: [],
+      anomalies: [],
+      rfqBatches: [],
+      updatedAt: new Date().toISOString(),
+    };
+    setTenders((prev) => [next, ...prev]);
+    setActiveTenderId(id);
+    setActiveTab('ingestion');
+  };
+
+  const handleDuplicateTender = (sourceId: string) => {
+    const src = tenders.find((x) => x.id === sourceId);
+    if (!src) return;
+    const newId = `ao_copy_${Date.now()}`;
+    const copy: TenderProject = {
+      ...src,
+      id: newId,
+      reference: `${src.reference}-COPIE`,
+      status: 'draft',
+      lots: src.lots.map((l) => ({ ...l, tenderId: newId })),
+      lineItems: src.lineItems.map((li) => ({ ...li, tenderId: newId })),
+      anomalies: src.anomalies.map((a) => ({ ...a, tenderId: newId })),
+      rfqBatches: [],
+      updatedAt: new Date().toISOString(),
+    };
+    setTenders((prev) => [copy, ...prev]);
+    setActiveTenderId(newId);
+  };
+
+  const handleLockSubmitted = async (id: string) => {
+    const target = tenders.find((x) => x.id === id);
+    if (!target || target.status === 'submitted') return;
+    const locked: TenderProject = { ...target, status: 'submitted', updatedAt: new Date().toISOString() };
+    setTenders((prev) => prev.map((x) => (x.id === id ? locked : x)));
+    if (user) {
+      saveTenderToFirestore(user.uid, locked).catch(() => {});
+    }
+  };
+
+  const handleDeleteTender = (id: string) => {
+    if (tenders.length <= 1) return;
+    setTenders((prev) => {
+      const filtered = prev.filter((x) => x.id !== id);
+      if (activeTenderId === id && filtered[0]) {
+        setActiveTenderId(filtered[0].id);
+      }
+      return filtered;
+    });
+    if (user) {
+      deleteTenderFromFirestore(user.uid, id).catch(() => {});
     }
   };
 
@@ -237,7 +407,8 @@ function ChiffrageApp() {
     lineItems: LineItem[];
     anomalies: TenderProject['anomalies'];
   }) => {
-    setTender((prev) => ({
+    if (isLocked) return;
+    updateActiveTender((prev) => ({
       ...prev,
       title: payload.title || prev.title,
       reference: payload.reference || prev.reference,
@@ -251,14 +422,16 @@ function ChiffrageApp() {
   };
 
   const handleResolveAnomaly = (anomalyId: string) => {
-    setTender((prev) => ({
+    if (isLocked) return;
+    updateActiveTender((prev) => ({
       ...prev,
       anomalies: prev.anomalies.map((a) => (a.id === anomalyId ? { ...a, resolved: true } : a)),
     }));
   };
 
   const handleFixItemUnit = (lineItemId: string, newUnit: string, anomalyId: string) => {
-    setTender((prev) => ({
+    if (isLocked) return;
+    updateActiveTender((prev) => ({
       ...prev,
       lineItems: prev.lineItems.map((li) =>
         li.id === lineItemId
@@ -270,7 +443,8 @@ function ChiffrageApp() {
   };
 
   const handleFixItemQuantity = (lineItemId: string, newQty: number, anomalyId: string) => {
-    setTender((prev) => ({
+    if (isLocked) return;
+    updateActiveTender((prev) => ({
       ...prev,
       lineItems: prev.lineItems.map((li) => (li.id === lineItemId ? { ...li, quantity: newQty } : li)),
       anomalies: prev.anomalies.map((a) => (a.id === anomalyId ? { ...a, resolved: true } : a)),
@@ -278,7 +452,8 @@ function ChiffrageApp() {
   };
 
   const handleApplySiteMultiplier = (multiplierPct: number, anomalyId: string, isOverhead = false) => {
-    setTender((prev) => ({
+    if (isLocked) return;
+    updateActiveTender((prev) => ({
       ...prev,
       globalOccupiedSitePct: isOverhead
         ? prev.globalOccupiedSitePct
@@ -303,7 +478,8 @@ function ChiffrageApp() {
       >
     >
   ) => {
-    setTender((prev) => ({ ...prev, ...patch, updatedAt: new Date().toISOString() }));
+    if (isLocked) return;
+    updateActiveTender((prev) => ({ ...prev, ...patch, updatedAt: new Date().toISOString() }));
   };
 
   const handleUpdateLotOverride = (
@@ -315,7 +491,8 @@ function ChiffrageApp() {
       >
     >
   ) => {
-    setTender((prev) => ({
+    if (isLocked) return;
+    updateActiveTender((prev) => ({
       ...prev,
       lots: prev.lots.map((l) => (l.id === lotId ? { ...l, ...patch } : l)),
       updatedAt: new Date().toISOString(),
@@ -323,7 +500,8 @@ function ChiffrageApp() {
   };
 
   const handleUpdateLineItem = (itemId: string, patch: Partial<LineItem>) => {
-    setTender((prev) => ({
+    if (isLocked) return;
+    updateActiveTender((prev) => ({
       ...prev,
       lineItems: prev.lineItems.map((li) => (li.id === itemId ? { ...li, ...patch } : li)),
       updatedAt: new Date().toISOString(),
@@ -331,8 +509,9 @@ function ChiffrageApp() {
   };
 
   const handleAutoFillFromPrivateBpu = (): number => {
+    if (isLocked) return 0;
     let matchedCount = 0;
-    setTender((prev) => {
+    updateActiveTender((prev) => {
       const updated = prev.lineItems.map((li) => {
         if (li.priceSource === 'supplier_verified') return li;
         const match = matchPrivateBpu(li, privateBpu, prev.wilayaCode);
@@ -354,6 +533,7 @@ function ChiffrageApp() {
 
   // --- Layer 3 Handlers ---
   const handleGenerateRfqBatches = () => {
+    if (isLocked) return;
     const eligible = tender.lineItems.filter((li) => li.abcClass === 'A' || li.includeInRfq);
     const byTrade = new Map<TradeCategory, LineItem[]>();
     for (const item of eligible) {
@@ -395,7 +575,7 @@ function ChiffrageApp() {
       }
     });
 
-    setTender((prev) => ({
+    updateActiveTender((prev) => ({
       ...prev,
       rfqBatches: nextBatches,
       updatedAt: new Date().toISOString(),
@@ -434,8 +614,9 @@ function ChiffrageApp() {
     unitPriceDa: number,
     brand: string
   ) => {
+    if (isLocked) return;
     const targetItem = tender.lineItems.find((li) => li.id === lineItemId);
-    setTender((prev) => ({
+    updateActiveTender((prev) => ({
       ...prev,
       lineItems: prev.lineItems.map((li) =>
         li.id === lineItemId
@@ -474,7 +655,7 @@ function ChiffrageApp() {
       selected: false,
       submittedAt: new Date().toISOString(),
     };
-    setTender((prev) => ({
+    updateActiveTender((prev) => ({
       ...prev,
       rfqBatches: prev.rfqBatches.map((b) =>
         b.shareToken === payload.shareToken ? { ...b, quotes: [...b.quotes, newQuote] } : b
@@ -532,6 +713,12 @@ function ChiffrageApp() {
 
   const navItems: Array<{ id: ActiveTab; label: string; icon: React.ReactNode; badge?: number }> = [
     {
+      id: 'portfolio',
+      label: lang === 'ar' ? 'محفظة الصفقات' : 'Appels d’Offres',
+      icon: <Briefcase className="w-4 h-4 shrink-0" />,
+      badge: tenders.length,
+    },
+    {
       id: 'ingestion',
       label: t.navIngestion,
       icon: <FileSearch className="w-4 h-4 shrink-0" />,
@@ -565,7 +752,7 @@ function ChiffrageApp() {
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 flex flex-col lg:flex-row">
-      {/* Left Sidebar Navigation (250px Desktop) */}
+      {/* Left Sidebar Navigation (252px Desktop) */}
       <aside className="w-full lg:w-[252px] bg-[#0F172A] text-slate-100 shrink-0 flex flex-col justify-between border-b lg:border-b-0 lg:border-e border-slate-800">
         <div>
           <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between gap-2">
@@ -656,15 +843,27 @@ function ChiffrageApp() {
         {/* Top Bar Contract: Breadcrumb on Left, Concise Primary Action on Right */}
         <header className="bg-white border-b border-slate-200 px-6 py-3.5 flex items-center justify-between gap-6">
           <div className="flex items-center gap-2 text-sm min-w-0">
-            <span className="text-slate-400 whitespace-nowrap shrink-0 ltr-preserve">{tender.reference}</span>
+            <button
+              type="button"
+              onClick={() => setActiveTab('portfolio')}
+              className="text-slate-500 hover:text-slate-900 whitespace-nowrap shrink-0 ltr-preserve"
+            >
+              {tender.reference}
+            </button>
             <span className="text-slate-300" aria-hidden="true">/</span>
             <h1 className="font-semibold text-slate-900 truncate">{activeNavLabel}</h1>
+            {isLocked && (
+              <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 ms-2 whitespace-nowrap shrink-0">
+                <Lock className="w-3.5 h-3.5" />
+                Soumis
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2.5 shrink-0">
             <button
               type="button"
-              onClick={() => exportTenderToExcel(tender, true)}
+              onClick={() => exportTenderToExcel(tender, true, companyLegal)}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-[#0F172A] hover:bg-slate-800 rounded-md transition-colors whitespace-nowrap shrink-0"
             >
               <Download className="w-3.5 h-3.5" />
@@ -731,12 +930,40 @@ function ChiffrageApp() {
 
         {/* Active Layer Viewport */}
         <main className="p-6 flex-1">
+          {activeTab === 'portfolio' && (
+            <TenderPortfolioView
+              tenders={tenders}
+              activeTenderId={tender.id}
+              lang={lang}
+              onSelectTender={(id) => {
+                setActiveTenderId(id);
+                setActiveTab('pricing');
+              }}
+              onCreateTender={handleCreateTender}
+              onDuplicateTender={handleDuplicateTender}
+              onLockSubmitted={handleLockSubmitted}
+              onDeleteTender={handleDeleteTender}
+              onLoadSampleTender={() => {
+                const sample = createSampleAlgerianTender();
+                sample.id = `ao_bejaia_${Date.now()}`;
+                setTenders((prev) => [sample, ...prev]);
+                setActiveTenderId(sample.id);
+                setActiveTab('ingestion');
+              }}
+            />
+          )}
+
           {activeTab === 'ingestion' && (
             <Layer1IngestionAudit
               tender={tender}
               lang={lang}
+              isLocked={isLocked}
+              getAuthToken={getAuthToken}
               onReplaceExtractedData={handleReplaceExtractedData}
-              onLoadSample={() => setTender(createSampleAlgerianTender())}
+              onLoadSample={() => {
+                const sample = createSampleAlgerianTender();
+                updateActiveTender(() => ({ ...sample, id: tender.id }));
+              }}
               onResolveAnomaly={handleResolveAnomaly}
               onFixItemUnit={handleFixItemUnit}
               onFixItemQuantity={handleFixItemQuantity}
@@ -775,12 +1002,22 @@ function ChiffrageApp() {
             <Layer4BpuExport
               tender={tender}
               privateBpu={privateBpu}
+              companyLegal={companyLegal}
               lang={lang}
+              onUpdateCompanyLegal={(legal) => {
+                setCompanyLegal(legal);
+                if (user) {
+                  syncUserProfile(user.uid, user.displayName || 'Entrepreneur BTP', lang, legal).catch(() => {});
+                }
+              }}
               onAddBpuEntry={(entry) => {
                 setPrivateBpu((prev) => [entry, ...prev]);
                 if (user) savePrivateBpuEntryToFirestore(user.uid, entry).catch(() => {});
               }}
-              onDeleteBpuEntry={(id) => setPrivateBpu((prev) => prev.filter((e) => e.id !== id))}
+              onDeleteBpuEntry={(id) => {
+                setPrivateBpu((prev) => prev.filter((e) => e.id !== id));
+                if (user) deletePrivateBpuEntryFromFirestore(id).catch(() => {});
+              }}
               onAutoFillFromPrivateBpu={handleAutoFillFromPrivateBpu}
             />
           )}

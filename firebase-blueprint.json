@@ -10,6 +10,12 @@
         "companyName": { "type": "string", "maxLength": 160 },
         "defaultWilayaCode": { "type": "string", "maxLength": 4, "pattern": "^[0-9]{2}$" },
         "preferredLang": { "type": "string", "enum": ["fr", "ar"] },
+        "rc": { "type": "string", "maxLength": 60 },
+        "nif": { "type": "string", "maxLength": 40 },
+        "nis": { "type": "string", "maxLength": 40 },
+        "ai": { "type": "string", "maxLength": 40 },
+        "rib": { "type": "string", "maxLength": 60 },
+        "qualification": { "type": "string", "maxLength": 120 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },

@@ -33,6 +33,8 @@ import {
 interface Props {
   tender: TenderProject;
   lang: AppLang;
+  isLocked?: boolean;
+  getAuthToken: () => Promise<string | null>;
   onReplaceExtractedData: (payload: {
     title?: string;
     reference?: string;
@@ -73,6 +75,8 @@ function fileToBase64(file: File): Promise<string> {
 export const Layer1IngestionAudit: React.FC<Props> = ({
   tender,
   lang,
+  isLocked = false,
+  getAuthToken,
   onReplaceExtractedData,
   onLoadSample,
   onResolveAnomaly,
@@ -86,13 +90,14 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
   const [queuedFiles, setQueuedFiles] = useState<QueuedFile[]>([]);
   const [reverseOrder, setReverseOrder] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [chunkProgress, setChunkProgress] = useState<string | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [extractBanner, setExtractBanner] = useState<string | null>(null);
   const [anomalyFilter, setAnomalyFilter] = useState<'all' | 'open' | 'critical'>('open');
   const [qtyDrafts, setQtyDrafts] = useState<Record<string, string>>({});
 
   const handleFilesSelected = (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return;
+    if (!fileList || fileList.length === 0 || isLocked) return;
     setExtractError(null);
     const next: QueuedFile[] = [];
     Array.from(fileList).forEach((f, idx) => {
@@ -113,10 +118,11 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
   };
 
   const handleRunExtraction = async () => {
-    if (queuedFiles.length === 0) return;
+    if (queuedFiles.length === 0 || isLocked) return;
     setIsExtracting(true);
     setExtractError(null);
     setExtractBanner(null);
+    setChunkProgress(null);
 
     try {
       const excelFile = queuedFiles.find((q) => q.type === 'excel');
@@ -140,149 +146,177 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
         return;
       }
 
-      // PDF / CamScanner Image Vision pipeline via server-side Gemini
-      const payloadFiles = await Promise.all(
-        queuedFiles.map(async (qf) => ({
-          name: qf.name,
-          mimeType: qf.file.type || (qf.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg'),
-          base64: await fileToBase64(qf.file),
-        }))
-      );
+      // Chunk multi-page CamScanner packs into batches of 4 files to prevent timeout & payload limits
+      const orderedQueue = reverseOrder ? [...queuedFiles].reverse() : [...queuedFiles];
+      const CHUNK_SIZE = 4;
+      const totalChunks = Math.ceil(orderedQueue.length / CHUNK_SIZE);
+      const idToken = await getAuthToken();
 
-      const response = await fetch('/api/extract-bqe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          files: payloadFiles,
-          reverseOrder,
-          wilayaName: tender.wilayaName,
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Échec de l’extraction Gemini Vision.');
-      }
-
+      const lotsByCode = new Map<string, TenderLot>();
       const lots: TenderLot[] = [];
       const lineItems: LineItem[] = [];
+      const aiAnomaliesRaw: Array<{
+        type: string;
+        severity: string;
+        title: string;
+        description: string;
+        articleNo?: string;
+        pageNumber?: number;
+        suggestedMultiplierPct?: number;
+        suggestedUnit?: string;
+        clauseTag?: string;
+      }> = [];
+      let detectedTitle = '';
+      let detectedRef = '';
+      let detectedClient = '';
+      let footerNotesAll = '';
       let itemCounter = 1;
 
-      (data.lots || []).forEach(
-        (
-          rawLot: {
-            code: string;
-            name: string;
-            items: Array<{
-              articleNo: string;
-              rawDesignation: string;
-              designation: string;
-              unit: string;
-              quantity: number;
-              pageNumber: number;
-              abcClass: string;
-              trade: string;
-            }>;
-          },
-          lIdx: number
-        ) => {
-          const lotId = `lot_ai_${lIdx + 1}`;
-          lots.push({
-            id: lotId,
-            tenderId: tender.id,
-            code: rawLot.code || `LOT 0${lIdx + 1}`,
-            name: rawLot.name || `Lot ${lIdx + 1}`,
-            orderIndex: lIdx + 1,
-          });
+      for (let c = 0; c < totalChunks; c++) {
+        const slice = orderedQueue.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
+        setChunkProgress(
+          lang === 'ar'
+            ? `معالجة الحزمة ${c + 1}/${totalChunks} (${slice.length} ملف)...`
+            : `Lot ${c + 1}/${totalChunks} · Analyse Gemini Vision (${c * CHUNK_SIZE + 1}–${c * CHUNK_SIZE + slice.length} / ${orderedQueue.length})...`
+        );
 
-          (rawLot.items || []).forEach((it) => {
-            const unit = (it.unit || 'U').toUpperCase();
-            const trade = (it.trade as TradeCategory) || classifyTrade(it.designation, rawLot.name);
-            const refMatch = lookupReferenceBpu(it.designation, unit, tender.wilayaCode);
-            const abcClass =
-              it.abcClass === 'A' || it.abcClass === 'B' || it.abcClass === 'C'
-                ? it.abcClass
-                : classifyAbcRisk(it.designation, Number(it.quantity) || 0, refMatch?.debourseSecDa ?? 0);
+        const payloadFiles = await Promise.all(
+          slice.map(async (qf) => ({
+            name: qf.name,
+            mimeType: qf.file.type || (qf.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg'),
+            base64: await fileToBase64(qf.file),
+          }))
+        );
 
-            const isClassA = abcClass === 'A';
-            lineItems.push({
-              id: `li_ai_${itemCounter++}`,
-              tenderId: tender.id,
-              lotId,
-              articleNo: it.articleNo || `${lIdx + 1}.${itemCounter}`,
-              designation: it.designation || it.rawDesignation,
-              rawDesignation: it.rawDesignation || it.designation,
-              unit,
-              quantity: Number(it.quantity) || 0,
-              pageNumber: Number(it.pageNumber) || 1,
-              abcClass,
-              trade,
-              debourseSecDa: isClassA ? 0 : refMatch?.debourseSecDa ?? (abcClass === 'C' ? 1200 : 2400),
-              confidenceRangePct: isClassA ? 0 : refMatch?.confidenceRangePct ?? 14,
-              priceSource: isClassA ? 'proforma_required' : 'indicative_bpu',
-              normalizedKey: normalizeItemKey(it.designation || it.rawDesignation, unit),
-              includeInRfq: isClassA,
-            });
-          });
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (idToken) headers.Authorization = `Bearer ${idToken}`;
+
+        const response = await fetch('/api/extract-bqe', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            files: payloadFiles,
+            reverseOrder: false, // already reversed before chunking
+            wilayaName: tender.wilayaName,
+            pageOffset: c * CHUNK_SIZE,
+          }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || 'Échec de l’extraction Gemini Vision.');
         }
-      );
+
+        if (!detectedTitle && data.tenderTitle) detectedTitle = data.tenderTitle;
+        if (!detectedRef && data.tenderReference) detectedRef = data.tenderReference;
+        if (!detectedClient && data.clientName) detectedClient = data.clientName;
+        if (data.detectedFooterClauses) footerNotesAll += ` ${data.detectedFooterClauses}`;
+        if (Array.isArray(data.anomalies)) aiAnomaliesRaw.push(...data.anomalies);
+
+        (data.lots || []).forEach(
+          (
+            rawLot: {
+              code: string;
+              name: string;
+              items: Array<{
+                articleNo: string;
+                rawDesignation: string;
+                designation: string;
+                unit: string;
+                quantity: number;
+                pageNumber: number;
+                abcClass: string;
+                trade: string;
+              }>;
+            },
+            lIdx: number
+          ) => {
+            const lotCode = (rawLot.code || `LOT 0${lots.length + 1}`).trim().toUpperCase();
+            let lotObj = lotsByCode.get(lotCode);
+            if (!lotObj) {
+              lotObj = {
+                id: `lot_ai_${lots.length + 1}`,
+                tenderId: tender.id,
+                code: lotCode,
+                name: rawLot.name || `Lot ${lots.length + 1}`,
+                orderIndex: lots.length + 1,
+              };
+              lotsByCode.set(lotCode, lotObj);
+              lots.push(lotObj);
+            }
+
+            (rawLot.items || []).forEach((it) => {
+              const unit = (it.unit || 'U').toUpperCase();
+              const trade = (it.trade as TradeCategory) || classifyTrade(it.designation, lotObj!.name);
+              const refMatch = lookupReferenceBpu(it.designation, unit, tender.wilayaCode);
+              const abcClass =
+                it.abcClass === 'A' || it.abcClass === 'B' || it.abcClass === 'C'
+                  ? it.abcClass
+                  : classifyAbcRisk(it.designation, Number(it.quantity) || 0, refMatch?.debourseSecDa ?? 0);
+
+              const isClassA = abcClass === 'A';
+              lineItems.push({
+                id: `li_ai_${itemCounter++}`,
+                tenderId: tender.id,
+                lotId: lotObj!.id,
+                articleNo: it.articleNo || `${lIdx + 1}.${itemCounter}`,
+                designation: it.designation || it.rawDesignation,
+                rawDesignation: it.rawDesignation || it.designation,
+                unit,
+                quantity: Number(it.quantity) || 0,
+                pageNumber: Number(it.pageNumber) || c * CHUNK_SIZE + 1,
+                abcClass,
+                trade,
+                debourseSecDa: isClassA ? 0 : refMatch?.debourseSecDa ?? (abcClass === 'C' ? 1200 : 2400),
+                confidenceRangePct: isClassA ? 0 : refMatch?.confidenceRangePct ?? 14,
+                priceSource: isClassA ? 'proforma_required' : 'indicative_bpu',
+                normalizedKey: normalizeItemKey(it.designation || it.rawDesignation, unit),
+                includeInRfq: isClassA,
+              });
+            });
+          }
+        );
+      }
 
       if (lineItems.length === 0) {
         throw new Error('Aucun article BQE détecté dans les pages scannées. Vérifiez la netteté du document.');
       }
 
-      // Combine AI-detected anomalies with deterministic engineering rules
-      const aiAnomalies: AnomalyFlag[] = (data.anomalies || []).map(
-        (
-          a: {
-            type: string;
-            severity: string;
-            title: string;
-            description: string;
-            articleNo?: string;
-            pageNumber?: number;
-            suggestedMultiplierPct?: number;
-            suggestedUnit?: string;
-            clauseTag?: string;
-          },
-          idx: number
-        ) => {
-          const matchedItem = a.articleNo
-            ? lineItems.find((li) => li.articleNo === a.articleNo)
-            : undefined;
-          return {
-            id: `anom_ai_${idx + 1}`,
-            tenderId: tender.id,
-            lineItemId: matchedItem?.id ?? null,
-            type:
-              a.type === 'truncated_fragment' ||
-              a.type === 'unit_anomaly' ||
-              a.type === 'hidden_cost_clause' ||
-              a.type === 'ocr_typo'
-                ? a.type
-                : 'hidden_cost_clause',
-            severity:
-              a.severity === 'critical' || a.severity === 'warning' || a.severity === 'info'
-                ? a.severity
-                : 'warning',
-            title: a.title,
-            description: a.description,
-            pageNumber: Number(a.pageNumber) || 1,
-            suggestedMultiplierPct: a.suggestedMultiplierPct ?? null,
-            suggestedUnit: a.suggestedUnit ?? null,
-            clauseTag: a.clauseTag ?? null,
-            resolved: false,
-          };
-        }
-      );
+      const aiAnomalies: AnomalyFlag[] = aiAnomaliesRaw.map((a, idx) => {
+        const matchedItem = a.articleNo
+          ? lineItems.find((li) => li.articleNo === a.articleNo)
+          : undefined;
+        return {
+          id: `anom_ai_${idx + 1}`,
+          tenderId: tender.id,
+          lineItemId: matchedItem?.id ?? null,
+          type:
+            a.type === 'truncated_fragment' ||
+            a.type === 'unit_anomaly' ||
+            a.type === 'hidden_cost_clause' ||
+            a.type === 'ocr_typo'
+              ? a.type
+              : 'hidden_cost_clause',
+          severity:
+            a.severity === 'critical' || a.severity === 'warning' || a.severity === 'info'
+              ? a.severity
+              : 'warning',
+          title: a.title,
+          description: a.description,
+          pageNumber: Number(a.pageNumber) || 1,
+          suggestedMultiplierPct: a.suggestedMultiplierPct ?? null,
+          suggestedUnit: a.suggestedUnit ?? null,
+          clauseTag: a.clauseTag ?? null,
+          resolved: false,
+        };
+      });
 
       const deterministicFlags = runDeterministicAudit(
         tender.id,
         lineItems,
-        data.detectedFooterClauses || ''
+        footerNotesAll
       );
 
-      // Deduplicate by title similarity
       const mergedAnomalies: AnomalyFlag[] = [...aiAnomalies];
       for (const df of deterministicFlags) {
         const exists = mergedAnomalies.some(
@@ -292,9 +326,9 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
       }
 
       onReplaceExtractedData({
-        title: data.tenderTitle || tender.title,
-        reference: data.tenderReference || tender.reference,
-        clientName: data.clientName || tender.clientName,
+        title: detectedTitle || tender.title,
+        reference: detectedRef || tender.reference,
+        clientName: detectedClient || tender.clientName,
         lots,
         lineItems,
         anomalies: mergedAnomalies,
@@ -302,14 +336,15 @@ export const Layer1IngestionAudit: React.FC<Props> = ({
 
       setExtractBanner(
         lang === 'ar'
-          ? `تم استخراج ${lineItems.length} بنداً عبر ${lots.length} حصص وكشف ${mergedAnomalies.length} نقطة تدقيق.`
-          : `Extraction réussie : ${lineItems.length} articles répartis en ${lots.length} lots et ${mergedAnomalies.length} alertes d'audit.`
+          ? `تم استخراج ${lineItems.length} بنداً عبر ${lots.length} حصص (${totalChunks} دفعات) وكشف ${mergedAnomalies.length} نقطة تدقيق.`
+          : `Extraction réussie (${totalChunks} lot(s) d'analyse) : ${lineItems.length} articles répartis en ${lots.length} lots et ${mergedAnomalies.length} alertes d'audit.`
       );
       setQueuedFiles([]);
     } catch (err: unknown) {
       setExtractError(err instanceof Error ? err.message : 'Erreur lors de l’extraction.');
     } finally {
       setIsExtracting(false);
+      setChunkProgress(null);
     }
   };
 
