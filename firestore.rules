@@ -1,0 +1,500 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidWilayaCode(code) {
+      return code is string && code.size() == 2 && code.matches('^[0-9]{2}$');
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidNumberRange(val, minVal, maxVal) {
+      return (val is int || val is float) && val >= minVal && val <= maxVal;
+    }
+
+    // --- Entity Validation Blueprints ---
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'companyName', 'defaultWilayaCode', 'preferredLang', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'companyName', 'defaultWilayaCode', 'preferredLang', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && isValidString(data.displayName, 1, 120)
+        && isValidString(data.companyName, 1, 160)
+        && isValidWilayaCode(data.defaultWilayaCode)
+        && data.preferredLang in ['fr', 'ar']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTender(data) {
+      return data.keys().hasAll([
+          'ownerId', 'title', 'reference', 'clientName', 'wilayaCode', 'wilayaName',
+          'status', 'globalTransportPct', 'globalOccupiedSitePct', 'globalOverheadPct',
+          'globalMarginPct', 'tvaRate', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'title', 'reference', 'clientName', 'wilayaCode', 'wilayaName',
+          'status', 'globalTransportPct', 'globalOccupiedSitePct', 'globalOverheadPct',
+          'globalMarginPct', 'tvaRate', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidString(data.title, 1, 240)
+        && isValidString(data.reference, 1, 100)
+        && isValidString(data.clientName, 1, 200)
+        && isValidWilayaCode(data.wilayaCode)
+        && isValidString(data.wilayaName, 1, 80)
+        && data.status in ['draft', 'auditing', 'rfq_pending', 'ready_to_submit', 'submitted']
+        && isValidNumberRange(data.globalTransportPct, 0, 100)
+        && isValidNumberRange(data.globalOccupiedSitePct, 0, 100)
+        && isValidNumberRange(data.globalOverheadPct, 0, 100)
+        && isValidNumberRange(data.globalMarginPct, 0, 100)
+        && isValidNumberRange(data.tvaRate, 0, 30)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTenderLot(data, tenderId) {
+      return data.keys().hasAll(['tenderId', 'ownerId', 'code', 'name', 'orderIndex', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'tenderId', 'ownerId', 'code', 'name', 'orderIndex',
+          'overrideTransportPct', 'overrideOccupiedSitePct', 'overrideOverheadPct', 'overrideMarginPct',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.tenderId)
+        && data.tenderId == tenderId
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidString(data.code, 1, 40)
+        && isValidString(data.name, 1, 200)
+        && isValidNumberRange(data.orderIndex, 0, 500)
+        && (!('overrideTransportPct' in data) || data.overrideTransportPct == null || isValidNumberRange(data.overrideTransportPct, 0, 100))
+        && (!('overrideOccupiedSitePct' in data) || data.overrideOccupiedSitePct == null || isValidNumberRange(data.overrideOccupiedSitePct, 0, 100))
+        && (!('overrideOverheadPct' in data) || data.overrideOverheadPct == null || isValidNumberRange(data.overrideOverheadPct, 0, 100))
+        && (!('overrideMarginPct' in data) || data.overrideMarginPct == null || isValidNumberRange(data.overrideMarginPct, 0, 100))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLineItem(data, tenderId) {
+      return data.keys().hasAll([
+          'tenderId', 'lotId', 'ownerId', 'articleNo', 'designation', 'rawDesignation',
+          'unit', 'quantity', 'pageNumber', 'abcClass', 'trade', 'debourseSecDa',
+          'confidenceRangePct', 'priceSource', 'normalizedKey', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'tenderId', 'lotId', 'ownerId', 'articleNo', 'designation', 'rawDesignation',
+          'unit', 'quantity', 'pageNumber', 'abcClass', 'trade', 'debourseSecDa',
+          'confidenceRangePct', 'priceSource', 'selectedQuoteId', 'selectedSupplierName',
+          'brand', 'normalizedKey', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.tenderId)
+        && data.tenderId == tenderId
+        && isValidId(data.lotId)
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidString(data.articleNo, 1, 40)
+        && isValidString(data.designation, 1, 1200)
+        && isValidString(data.rawDesignation, 1, 1200)
+        && isValidString(data.unit, 1, 24)
+        && isValidNumberRange(data.quantity, 0, 100000000)
+        && isValidNumberRange(data.pageNumber, 1, 2000)
+        && data.abcClass in ['A', 'B', 'C']
+        && isValidString(data.trade, 1, 80)
+        && isValidNumberRange(data.debourseSecDa, 0, 10000000000)
+        && isValidNumberRange(data.confidenceRangePct, 0, 100)
+        && data.priceSource in ['proforma_required', 'indicative_bpu', 'private_bpu', 'supplier_verified', 'manual_override']
+        && (!('selectedQuoteId' in data) || data.selectedQuoteId == null || isValidString(data.selectedQuoteId, 0, 128))
+        && (!('selectedSupplierName' in data) || data.selectedSupplierName == null || isValidString(data.selectedSupplierName, 0, 160))
+        && (!('brand' in data) || data.brand == null || isValidString(data.brand, 0, 120))
+        && isValidString(data.normalizedKey, 1, 200)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAnomaly(data, tenderId) {
+      return data.keys().hasAll([
+          'tenderId', 'ownerId', 'type', 'severity', 'title', 'description',
+          'pageNumber', 'resolved', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'tenderId', 'ownerId', 'lineItemId', 'type', 'severity', 'title',
+          'description', 'pageNumber', 'suggestedMultiplierPct', 'resolved',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.tenderId)
+        && data.tenderId == tenderId
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && (!('lineItemId' in data) || data.lineItemId == null || isValidString(data.lineItemId, 0, 128))
+        && data.type in ['truncated_fragment', 'unit_anomaly', 'hidden_cost_clause', 'ocr_typo']
+        && data.severity in ['critical', 'warning', 'info']
+        && isValidString(data.title, 1, 200)
+        && isValidString(data.description, 1, 1000)
+        && isValidNumberRange(data.pageNumber, 1, 2000)
+        && (!('suggestedMultiplierPct' in data) || data.suggestedMultiplierPct == null || isValidNumberRange(data.suggestedMultiplierPct, 0, 100))
+        && data.resolved is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateBpuEntry(data) {
+      return data.keys().hasAll([
+          'ownerId', 'normalizedItemKey', 'designation', 'unit', 'brand',
+          'wilayaCode', 'wilayaName', 'trade', 'supplierName', 'debourseSecDa',
+          'quotedDate', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'normalizedItemKey', 'designation', 'unit', 'brand',
+          'wilayaCode', 'wilayaName', 'trade', 'supplierName', 'debourseSecDa',
+          'quotedDate', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidString(data.normalizedItemKey, 1, 200)
+        && isValidString(data.designation, 1, 500)
+        && isValidString(data.unit, 1, 24)
+        && isValidString(data.brand, 0, 120)
+        && isValidWilayaCode(data.wilayaCode)
+        && isValidString(data.wilayaName, 1, 80)
+        && isValidString(data.trade, 1, 80)
+        && isValidString(data.supplierName, 1, 160)
+        && isValidNumberRange(data.debourseSecDa, 0, 10000000000)
+        && isValidString(data.quotedDate, 4, 32)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRfqPublicBatch(data, shareToken) {
+      return data.keys().hasAll([
+          'shareToken', 'tenderId', 'ownerId', 'trade', 'wilayaName',
+          'deadline', 'status', 'items', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'shareToken', 'tenderId', 'ownerId', 'trade', 'wilayaName',
+          'deadline', 'status', 'items', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.shareToken)
+        && data.shareToken == shareToken
+        && isValidId(data.tenderId)
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && isValidString(data.trade, 1, 80)
+        && isValidString(data.wilayaName, 1, 80)
+        && isValidString(data.deadline, 4, 32)
+        && data.status in ['open', 'closed']
+        && data.items is list
+        && data.items.size() >= 1
+        && data.items.size() <= 30
+        && data.items[0] is map
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSupplierQuote(data, shareToken, expectedOwnerId, expectedTenderId) {
+      return data.keys().hasAll([
+          'shareToken', 'tenderId', 'ownerId', 'supplierName',
+          'leadTimeDays', 'lineQuotes', 'selected', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'shareToken', 'tenderId', 'ownerId', 'supplierName', 'supplierPhone',
+          'leadTimeDays', 'notes', 'lineQuotes', 'selected', 'createdAt'
+        ])
+        && isValidId(data.shareToken)
+        && data.shareToken == shareToken
+        && isValidId(data.tenderId)
+        && data.tenderId == expectedTenderId
+        && isValidId(data.ownerId)
+        && data.ownerId == expectedOwnerId
+        && isValidString(data.supplierName, 1, 160)
+        && (!('supplierPhone' in data) || isValidString(data.supplierPhone, 0, 40))
+        && isValidNumberRange(data.leadTimeDays, 0, 365)
+        && (!('notes' in data) || isValidString(data.notes, 0, 600))
+        && data.lineQuotes is list
+        && data.lineQuotes.size() >= 1
+        && data.lineQuotes.size() <= 30
+        && data.lineQuotes[0] is map
+        && data.selected is bool
+        && data.createdAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+
+    // 1. Contractor Profile (Strict Owner-Only PII isolation)
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserProfile(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'companyName', 'defaultWilayaCode', 'preferredLang', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 2. Tenders (Master Source of Truth)
+    match /tenders/{tenderId} {
+      allow get: if isVerifiedUser() && isValidId(tenderId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(tenderId)
+        && isValidTender(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(tenderId)
+        && isValidTender(incoming())
+        && existing().ownerId == request.auth.uid
+        && existing().status != 'submitted'
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update tender metadata or coefficients
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'reference', 'clientName', 'wilayaCode', 'wilayaName',
+            'globalTransportPct', 'globalOccupiedSitePct', 'globalOverheadPct',
+            'globalMarginPct', 'tvaRate', 'updatedAt'
+          ])
+          ||
+          // Action: Advance tender workflow status
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+        );
+      allow delete: if isVerifiedUser()
+        && isValidId(tenderId)
+        && existing().ownerId == request.auth.uid
+        && existing().status != 'submitted';
+
+      // Master Gate Helper for Tender Subcollections
+      function isTenderOwner() {
+        return exists(/databases/$(database)/documents/tenders/$(tenderId))
+          && get(/databases/$(database)/documents/tenders/$(tenderId)).data.ownerId == request.auth.uid;
+      }
+
+      function isTenderOpen() {
+        return isTenderOwner()
+          && get(/databases/$(database)/documents/tenders/$(tenderId)).data.status != 'submitted';
+      }
+
+      // 2a. Tender Lots
+      match /lots/{lotId} {
+        allow get: if isVerifiedUser() && isValidId(tenderId) && isValidId(lotId) && existing().ownerId == request.auth.uid && isTenderOwner();
+        allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(tenderId)
+          && isValidId(lotId)
+          && isValidTenderLot(incoming(), tenderId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isTenderOpen();
+        allow update: if isVerifiedUser()
+          && isValidId(tenderId)
+          && isValidId(lotId)
+          && isValidTenderLot(incoming(), tenderId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().tenderId == existing().tenderId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && isTenderOpen()
+          && (
+            // Action: Update lot info or per-lot coefficient overrides
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'code', 'name', 'orderIndex',
+              'overrideTransportPct', 'overrideOccupiedSitePct', 'overrideOverheadPct', 'overrideMarginPct',
+              'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedUser() && isValidId(tenderId) && isValidId(lotId) && existing().ownerId == request.auth.uid && isTenderOpen();
+      }
+
+      // 2b. Line Items
+      match /line_items/{itemId} {
+        allow get: if isVerifiedUser() && isValidId(tenderId) && isValidId(itemId) && existing().ownerId == request.auth.uid && isTenderOwner();
+        allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(tenderId)
+          && isValidId(itemId)
+          && isValidLineItem(incoming(), tenderId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isTenderOpen();
+        allow update: if isVerifiedUser()
+          && isValidId(tenderId)
+          && isValidId(itemId)
+          && isValidLineItem(incoming(), tenderId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().tenderId == existing().tenderId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && isTenderOpen()
+          && (
+            // Action: Edit pricing, ABC class, or verified quote selection
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'designation', 'unit', 'quantity', 'abcClass', 'trade',
+              'debourseSecDa', 'confidenceRangePct', 'priceSource',
+              'selectedQuoteId', 'selectedSupplierName', 'brand', 'normalizedKey', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedUser() && isValidId(tenderId) && isValidId(itemId) && existing().ownerId == request.auth.uid && isTenderOpen();
+      }
+
+      // 2c. Ingestion Audit Anomalies
+      match /anomalies/{anomalyId} {
+        allow get: if isVerifiedUser() && isValidId(tenderId) && isValidId(anomalyId) && existing().ownerId == request.auth.uid && isTenderOwner();
+        allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(tenderId)
+          && isValidId(anomalyId)
+          && isValidAnomaly(incoming(), tenderId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isTenderOpen();
+        allow update: if isVerifiedUser()
+          && isValidId(tenderId)
+          && isValidId(anomalyId)
+          && isValidAnomaly(incoming(), tenderId)
+          && existing().ownerId == request.auth.uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().tenderId == existing().tenderId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && isTenderOpen()
+          && (
+            // Action: Resolve or reopen anomaly flag
+            incoming().diff(existing()).affectedKeys().hasOnly(['resolved', 'updatedAt'])
+          );
+        allow delete: if isVerifiedUser() && isValidId(tenderId) && isValidId(anomalyId) && existing().ownerId == request.auth.uid && isTenderOpen();
+      }
+    }
+
+    // 3. Private BPU Memory (Contractor-owned price history)
+    match /private_bpu/{bpuId} {
+      allow get: if isVerifiedUser() && isValidId(bpuId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(bpuId)
+        && isValidPrivateBpuEntry(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(bpuId)
+        && isValidPrivateBpuEntry(incoming())
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update BPU price or metadata
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'designation', 'unit', 'brand', 'wilayaCode', 'wilayaName',
+            'trade', 'supplierName', 'debourseSecDa', 'quotedDate', 'updatedAt'
+          ])
+        );
+      allow delete: if isVerifiedUser() && isValidId(bpuId) && existing().ownerId == request.auth.uid;
+    }
+
+    // 4. Zero-Friction No-Login Micro-RFQ Public Batches
+    match /rfq_public/{shareToken} {
+      // Single-document GET by unguessable shareToken (no enumeration allowed)
+      allow get: if isValidId(shareToken);
+      // Only authenticated owner can list their own RFQ batches
+      allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(shareToken)
+        && isValidRfqPublicBatch(incoming(), shareToken)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/tenders/$(incoming().tenderId))
+        && get(/databases/$(database)/documents/tenders/$(incoming().tenderId)).data.ownerId == request.auth.uid;
+      allow update: if isVerifiedUser()
+        && isValidId(shareToken)
+        && isValidRfqPublicBatch(incoming(), shareToken)
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().tenderId == existing().tenderId
+        && incoming().shareToken == existing().shareToken
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Close/reopen batch or update deadline
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'deadline', 'updatedAt'])
+        );
+      allow delete: if isVerifiedUser() && isValidId(shareToken) && existing().ownerId == request.auth.uid;
+
+      // 4a. Supplier Quote Submissions (Write-once for suppliers, Read/Compare strictly for contractor owner)
+      match /quotes/{quoteId} {
+        allow get: if isVerifiedUser()
+          && isValidId(shareToken)
+          && isValidId(quoteId)
+          && existing().ownerId == request.auth.uid;
+        allow list: if isVerifiedUser()
+          && resource.data.ownerId == request.auth.uid;
+        // No-login supplier submission gated by open parent batch & strict schema
+        allow create: if isValidId(shareToken)
+          && isValidId(quoteId)
+          && incoming().selected == false
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/rfq_public/$(shareToken))
+          && get(/databases/$(database)/documents/rfq_public/$(shareToken)).data.status == 'open'
+          && isValidSupplierQuote(
+              incoming(),
+              shareToken,
+              get(/databases/$(database)/documents/rfq_public/$(shareToken)).data.ownerId,
+              get(/databases/$(database)/documents/rfq_public/$(shareToken)).data.tenderId
+            );
+        allow update: if isVerifiedUser()
+          && isValidId(shareToken)
+          && isValidId(quoteId)
+          && existing().ownerId == request.auth.uid
+          && isValidSupplierQuote(incoming(), shareToken, existing().ownerId, existing().tenderId)
+          && incoming().createdAt == existing().createdAt
+          && (
+            // Action: Contractor marks quote as selected winner
+            incoming().diff(existing()).affectedKeys().hasOnly(['selected'])
+          );
+        allow delete: if isVerifiedUser() && isValidId(shareToken) && isValidId(quoteId) && existing().ownerId == request.auth.uid;
+      }
+    }
+  }
+}

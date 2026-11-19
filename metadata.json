@@ -1,0 +1,6 @@
+{
+  "name": "ChiffrageDZ — BQE & Devis BTP Algérie",
+  "description": "Plateforme professionnelle de chiffrage des marchés publics BTP en Algérie : extraction CamScanner/Excel, audit d'anomalies, triage ABC 80/20, Micro-RFQ WhatsApp fournisseurs, BPU privé et export Excel en toutes lettres.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
